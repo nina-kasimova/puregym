@@ -6,6 +6,28 @@ import os
 import csv
 import schedule
 import time
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+import json
+
+
+try:
+    # Attempt to load from environment variable first (for CI/CD)
+    service_account_info = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
+    if service_account_info:
+        cred = credentials.Certificate(json.loads(service_account_info))
+    else:
+        # fallback for local development
+        cred = credentials.Certificate(
+            "puregym-b4080-firebase-adminsdk-fbsvc-3d75c56029.json")
+
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("Firestore initialised successfully.")
+except Exception as e:
+    print(f"Error initialising Firestore: {e}")
+    db = None  # Set db to None if initialization fails
 
 
 class PureGym:
@@ -30,9 +52,11 @@ class PureGym:
         if response.status_code == 200:
             self.access_token = f"Bearer " + response.json()["access_token"]
             self.authed = True
-        print("response ", response)
 
     def get_attendance(self, file_name="gym_log.csv"):
+        if not db:
+            print("Firestore not initialized. Cannot log attendance.")
+            return
         url = "https://capi.puregym.com/api/v2/gymSessions/gym?gymId=75"
 
         headers = {
@@ -42,21 +66,28 @@ class PureGym:
             "x-purebrand": "PGUK"
         }
 
-        response = requests.get(url, headers=headers)
+        try:
+            response = requests.get(url, headers=headers)
 
-        if response.status_code == 200:
-            data = response.json()
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            people = data['TotalPeopleInGym']
+            if response.status_code == 200:
+                data = response.json()
+                now = datetime.now()  # Get datetime object
+                people = data['TotalPeopleInGym']
 
-            with open(file_name, mode='a', newline='') as file:
-                writer = csv.writer(file)
-                if os.stat(file_name).st_size == 0:
-                    writer.writerow(["timestamp", "people_in_gym"])
-                writer.writerow([now, people])
-            print(f"Logged: {now} → {people} people")
-        else:
-            print("Failed to log attendance")
+                # Add data to a Firestore collection
+                doc_ref = db.collection('gym_attendance').add({
+                    'timestamp': now,  # Firestore can store datetime objects
+                    'people_in_gym': people
+                })
+                print(
+                    f"Logged to Firestore: {now.strftime('%Y-%m-%d %H:%M:%S')} → {people} people. Document ID: {doc_ref[1].id}")
+            else:
+                print(f"Failed to get attendance from API. Status code: {response.status_code}")
+                print(f"Response: {response.text}")
+        except requests.exceptions.RequestException as e:
+            print(f"Network error or API request failed: {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred during attendance logging: {e}")
 
     def sendEmailNotif(self, email, password):
         port = 465  # For SSL
