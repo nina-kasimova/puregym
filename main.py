@@ -85,17 +85,10 @@ if __name__ == '__main__':
     puregym = PureGym()
     puregym.login(email,password)
 
-    # only start if login was successful
     if puregym.authed:
+        puregym.get_attendance()
 
-        def job():
-            puregym.get_attendance()
-
-
-        schedule.every(30).minutes.do(job)
-
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
+    else:
+        print("Login failed, attendance logging skipped.")
 
 
