@@ -1,3 +1,4 @@
 /.idea
 .env
 /puregym-b4080-firebase-adminsdk-fbsvc-3d75c56029.json
+/main-local.py

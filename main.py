@@ -1,6 +1,6 @@
 import requests
 import smtplib, ssl
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
 import csv
@@ -29,11 +29,16 @@ except Exception as e:
     print(f"Error initialising Firestore: {e}")
     db = None  # Set db to None if initialization fails
 
+USER_ID = "default_user"
 
 class PureGym:
     def __init__(self):
         self.access_token = None
         self.authed = False
+        self.telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            print("WARNING: Telegram bot token or chat ID not found. Notifications will not be sent.")
 
     def login(self, email, pin):
         headers = {'Content-Type': 'application/x-www-form-urlencoded',
@@ -81,29 +86,111 @@ class PureGym:
                 })
                 print(
                     f"Logged to Firestore: {now.strftime('%Y-%m-%d %H:%M:%S')} → {people} people. Document ID: {doc_ref[1].id}")
+                return people
             else:
                 print(f"Failed to get attendance from API. Status code: {response.status_code}")
                 print(f"Response: {response.text}")
+                return None
         except requests.exceptions.RequestException as e:
             print(f"Network error or API request failed: {e}")
+            return None
         except Exception as e:
             print(f"An unexpected error occurred during attendance logging: {e}")
+            return None
 
-    def sendEmailNotif(self, email, password):
-        port = 465  # For SSL
-        smtp_server = "smtp.gmail.com"
-        sender_email = email  # Enter your address
-        password = password
-        receiver_email = "nina.kasimova@gmail.com"  # Enter receiver address
-        message = f"There are {self.get_attendance()} people at the gym "
+    def send_telegram_message(self, message):
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            print("Telegram bot token or chat ID not configured. Cannot send message.")
+            return
 
-        # Create a secure SSL context
-        context = ssl.create_default_context()
+        telegram_api_url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+        payload = {
+            "chat_id": self.telegram_chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        try:
+            response = requests.post(telegram_api_url, json=payload)
+            response.raise_for_status()
+            print("Telegram message sent successfully.")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send Telegram message: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Telegram API response error: {e.response.text}")
 
-        with smtplib.SMTP_SSL(smtp_server, port, context=context) as server:
-            server.login(sender_email, password)
-            server.sendmail(sender_email, receiver_email, message)
-            print("email sent")
+    def get_notification_tracker(self):
+        if not db:
+            return {}
+        tracker_ref = db.collection('user_settings').document(USER_ID)
+        try:
+            tracker_doc = tracker_ref.get()
+            return tracker_doc.to_dict() if tracker_doc.exists else {}
+        except Exception as e:
+            print(f"Error getting notification tracker: {e}")
+            return {}
+
+    def update_notification_tracker(self, data):
+        if not db:
+            return
+        tracker_ref = db.collection('user_settings').document(USER_ID)
+        try:
+            tracker_ref.set(data, merge=True)
+        except Exception as e:
+            print(f"Error updating notification tracker: {e}")
+
+    def check_and_send_notification(self, current_people_count):
+        if not db:
+            print("Firestore not initialized. Cannot check for notifications.")
+            return
+
+        current_utc_time = datetime.now(timezone.utc)
+        current_hour_utc = current_utc_time.hour
+        current_date_utc = current_utc_time.date()
+
+        # Notification parameters
+        NOTIFICATION_THRESHOLD = 80
+        NOTIFICATION_START_HOUR_UTC = 17  # 5 PM UTC
+        NOTIFICATION_END_HOUR_UTC = 23  # 11 PM UTC
+
+        if current_people_count is not None and current_people_count < NOTIFICATION_THRESHOLD:
+            print(f"Current people count ({current_people_count}) is below threshold ({NOTIFICATION_THRESHOLD}).")
+
+            if NOTIFICATION_START_HOUR_UTC <= current_hour_utc <= NOTIFICATION_END_HOUR_UTC:
+                print(f"Current time ({current_hour_utc}:00 UTC) is within the 5 PM - 11 PM UTC window.")
+
+                tracker_data = self.get_notification_tracker()
+                last_notification_timestamp = tracker_data.get('last_notification_timestamp')
+
+                notified_today = False
+                if last_notification_timestamp:
+                    # Convert Firestore Timestamp to datetime object and then to date
+                    last_notification_date_utc = last_notification_timestamp.date()
+                    if last_notification_date_utc == current_date_utc:
+                        notified_today = True
+                        print(f"Notification already sent today ({last_notification_date_utc}). Skipping.")
+
+                if not notified_today:
+                    notification_message = (
+                        f"🚨 *PureGym Alert!* 🚨\n"
+                        f"Attendance dropped to *{current_people_count}* people "
+                        f"at {current_utc_time.strftime('%H:%M')} UTC.\n"
+                        f"Perfect time to hit the gym!"
+                    )
+                    self.send_telegram_message(notification_message)
+
+                    self.update_notification_tracker({
+                        'last_notification_timestamp': datetime.now() ,
+                        'last_notified_people_count': current_people_count
+                    })
+                    print("Notification status updated in Firestore.")
+                else:
+                    print("Conditions met, but notification already sent today.")
+            else:
+                print(
+                    f"Current time ({current_hour_utc}:00 UTC) is outside the {NOTIFICATION_START_HOUR_UTC} PM - {NOTIFICATION_END_HOUR_UTC} PM UTC window.")
+        else:
+            print(
+                f"Current people count ({current_people_count}) is not below {NOTIFICATION_THRESHOLD} or is None. No notification triggered.")
 
 
 if __name__ == '__main__':
@@ -116,10 +203,14 @@ if __name__ == '__main__':
     puregym = PureGym()
     puregym.login(email,password)
 
+    # Simplified to only perform logging and notification check
     if puregym.authed:
-        puregym.get_attendance()
-
+        people_in_gym = puregym.get_attendance()
+        if people_in_gym is not None:
+            puregym.check_and_send_notification(people_in_gym)
+        else:
+            print("Could not retrieve attendance, skipping notification check.")
     else:
-        print("Login failed, attendance logging skipped.")
+        print("Login failed, skipping action.")
 
 
