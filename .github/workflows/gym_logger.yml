@@ -26,7 +26,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: gym_log
-        path: .
+        path: gym_log.csv
       continue-on-error: true
 
     - name: Install dependencies
