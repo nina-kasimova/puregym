@@ -28,3 +28,9 @@ jobs:
         PUREGYM_EMAIL: ${{ secrets.PUREGYM_EMAIL }}
         PUREGYM_PASS: ${{ secrets.PUREGYM_PASS }}
       run: python main.py
+
+    - name: Upload gym_log.csv artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: gym_log
+        path: gym_log.csv
